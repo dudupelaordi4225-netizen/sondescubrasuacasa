@@ -2,15 +2,29 @@
    APP.JS — Descubra sua Casa | SON
    Lógica das telas, do quiz, da revelação e do resultado.
    Conteúdo em quiz-data.js · links em config.js
+
+   NOVIDADES DESTA VERSÃO
+   - getRandomQuestions() sorteia 12 perguntas do banco de 40
+     (quiz-data.js -> QUESTION_POOL), garantindo pelo menos uma
+     pergunta de cada categoria e embaralhando a ordem das
+     perguntas e das alternativas. Tudo acontece uma única vez,
+     no clique de "Descobrir minha Casa" (ver init -> btn-start).
+   - registerAttempt()/saveAttempt()/loadAttempts() controlam,
+     via localStorage, quantas vezes o teste foi feito neste
+     dispositivo e mantêm um histórico das últimas 10 tentativas.
+   - Nada disso usa backend: é tudo local ao navegador.
    ========================================================= */
 
 (function () {
   "use strict";
 
-  /* ---------- helpers ---------- */
+  /* ---------- helpers gerais ---------- */
   const $ = (id) => document.getElementById(id);
   const HOUSE_KEYS = Object.keys(HOUSES);
   const STORE_KEY = "son_casas_v2";
+  const ATTEMPTS_KEY = "son_casas_attempts_v1";
+  const QUESTIONS_PER_ATTEMPT = 12;
+  const MAX_HISTORY = 10;
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const el = {
@@ -33,10 +47,16 @@
     qTotal: $("q-total"),
     question: $("question-text"),
     options: $("options-wrap"),
-    toast: $("toast")
+    toast: $("toast"),
+    notice: $("returning-notice"),
+    noticeText: $("notice-text"),
+    noticeClose: $("notice-close")
   };
 
-  const state = { index: 0, answers: [] };
+  // "questions" guarda o conjunto sorteado e embaralhado desta
+  // tentativa (perguntas + ordem das alternativas). É montado uma
+  // única vez, no início do teste (ver btn-start em init()).
+  const state = { index: 0, answers: [], questions: [] };
 
   /* ---------- escudos ---------- */
   function shieldMarkup(key) {
@@ -58,14 +78,144 @@
     window.scrollTo({ top: 0, behavior: reduce ? "auto" : "smooth" });
   }
 
-  function toast(msg) {
+  function toast(msg, ms) {
     el.toast.textContent = msg;
     el.toast.classList.add("show");
     window.clearTimeout(toast._t);
-    toast._t = window.setTimeout(() => el.toast.classList.remove("show"), 2600);
+    toast._t = window.setTimeout(() => el.toast.classList.remove("show"), ms || 2600);
   }
 
   const wait = (ms) => new Promise((r) => window.setTimeout(r, reduce ? Math.min(ms, 120) : ms));
+
+  /* =========================================================
+     BANCO DE PERGUNTAS & ALEATORIZAÇÃO
+     Centralizado aqui para manter a lógica de sorteio isolada
+     do conteúdo (quiz-data.js) e da renderização das telas.
+     ========================================================= */
+
+  // Fisher-Yates — embaralha sem alterar o array original.
+  function shuffleArray(list) {
+    const arr = list.slice();
+    for (let i = arr.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr;
+  }
+
+  function getQuestionPool() {
+    return QUESTION_POOL;
+  }
+
+  // Sorteia `count` perguntas garantindo, sempre que possível,
+  // pelo menos uma de cada categoria — depois completa o restante
+  // aleatoriamente e embaralha a ordem final. As alternativas de
+  // cada pergunta também são embaralhadas, em uma cópia própria
+  // da sessão (o banco original nunca é alterado).
+  function getRandomQuestions(count) {
+    const pool = getQuestionPool();
+
+    const byCategory = {};
+    CATEGORIES.forEach((c) => { byCategory[c] = []; });
+    pool.forEach((q) => {
+      if (byCategory[q.category]) byCategory[q.category].push(q);
+    });
+
+    const picked = [];
+    const pickedSet = new Set();
+    CATEGORIES.forEach((c) => {
+      const options = byCategory[c];
+      if (!options || !options.length) return;
+      const choice = options[Math.floor(Math.random() * options.length)];
+      if (!pickedSet.has(choice)) {
+        picked.push(choice);
+        pickedSet.add(choice);
+      }
+    });
+
+    const remaining = shuffleArray(pool.filter((q) => !pickedSet.has(q)));
+    let i = 0;
+    while (picked.length < count && i < remaining.length) {
+      picked.push(remaining[i]);
+      i += 1;
+    }
+
+    return shuffleArray(picked)
+      .slice(0, count)
+      .map((q) => ({
+        text: q.text,
+        category: q.category,
+        options: shuffleArray(q.options)
+      }));
+  }
+
+  /* =========================================================
+     CONTROLE DE TENTATIVAS (localStorage)
+     Não impede novas tentativas — apenas registra e informa.
+     ========================================================= */
+
+  function loadAttempts() {
+    try {
+      const raw = window.localStorage.getItem(ATTEMPTS_KEY);
+      if (!raw) return { count: 0, history: [] };
+      const parsed = JSON.parse(raw);
+      return {
+        count: typeof parsed.count === "number" ? parsed.count : 0,
+        history: Array.isArray(parsed.history) ? parsed.history : []
+      };
+    } catch (_) {
+      return { count: 0, history: [] };
+    }
+  }
+
+  function saveAttempt(entry) {
+    const data = loadAttempts();
+    data.count += 1;
+    data.history.push(entry);
+    if (data.history.length > MAX_HISTORY) {
+      data.history = data.history.slice(data.history.length - MAX_HISTORY);
+    }
+    try {
+      window.localStorage.setItem(ATTEMPTS_KEY, JSON.stringify(data));
+    } catch (_) { /* modo privado / localStorage indisponível */ }
+    return data.count;
+  }
+
+  function registerAttempt(result) {
+    const now = new Date();
+    const entry = {
+      date: now.toLocaleDateString("pt-BR"),
+      time: now.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+      house: HOUSES[result.winner].name,
+      compat: result.compat,
+      name: state.userName || null
+    };
+    const count = saveAttempt(entry);
+    console.log("Tentativa nº " + count);
+    return count;
+  }
+
+  function showReturningNotice() {
+    el.noticeText.textContent =
+      "Percebemos que este dispositivo já realizou o teste anteriormente. Recomendamos considerar o primeiro resultado, pois ele representa melhor o seu perfil.";
+    el.notice.classList.add("show");
+    window.clearTimeout(showReturningNotice._t);
+    showReturningNotice._t = window.setTimeout(hideReturningNotice, 9000);
+  }
+
+  function hideReturningNotice() {
+    el.notice.classList.remove("show");
+    window.clearTimeout(showReturningNotice._t);
+  }
+
+  function warnIfReturningUser() {
+    const attempts = loadAttempts();
+    if (attempts.count > 0) {
+      window.setTimeout(showReturningNotice, 900);
+    }
+  }
 
   /* ---------- quiz ---------- */
   function progressText(ratio) {
@@ -74,8 +224,8 @@
   }
 
   function renderQuestion() {
-    const q = QUESTIONS[state.index];
-    const total = QUESTIONS.length;
+    const q = state.questions[state.index];
+    const total = state.questions.length;
     const ratio = state.index / total;
 
     el.qTotal.textContent = String(total);
@@ -125,7 +275,7 @@
     await wait(160);
     el.options.classList.remove("q-exit");
 
-    if (state.index < QUESTIONS.length - 1) {
+    if (state.index < state.questions.length - 1) {
       state.index += 1;
       renderQuestion();
     } else {
@@ -148,7 +298,8 @@
     const v = {};
     TRAITS.forEach((t) => (v[t] = 0));
     state.answers.forEach((optIndex, qIndex) => {
-      const opt = QUESTIONS[qIndex] && QUESTIONS[qIndex].options[optIndex];
+      const q = state.questions[qIndex];
+      const opt = q && q.options[optIndex];
       if (!opt) return;
       Object.entries(opt.weights).forEach(([t, w]) => {
         if (t in v) v[t] += w;
@@ -167,20 +318,25 @@
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
   }
 
+  function calculateCompatibility(scores) {
+    // normaliza para uma faixa legível (78% – 99%)
+    const best = scores[0].score;
+    const worst = scores[scores.length - 1].score;
+    const span = Math.max(best - worst, 0.0001);
+    return Math.round(78 + ((best - worst) / span) * 21);
+  }
+
   function computeResult() {
     const v = userVector();
     // similaridade de cosseno entre o vetor do jovem e o vetor de cada Casa
     const scores = HOUSE_KEYS.map((k) => ({ key: k, score: cosine(v, HOUSE_PROFILES[k]) }))
       .sort((a, b) => b.score - a.score);
 
-    // normaliza para uma faixa legível (78% – 99%)
-    const best = scores[0].score;
-    const worst = scores[scores.length - 1].score;
-    const span = Math.max(best - worst, 0.0001);
-    const compat = Math.round(78 + ((best - worst) / span) * 21);
+    const compat = calculateCompatibility(scores);
 
     // nível de confiança: distância relativa entre 1º e 2º colocado
     const second = scores[1] ? scores[1].score : 0;
+    const best = scores[0].score;
     const gap = best > 0 ? ((best - second) / best) * 100 : 0;
     const confidence = {
       gap: Math.round(gap * 10) / 10,
@@ -247,6 +403,10 @@
 
   function renderResult(result) {
     const house = HOUSES[result.winner];
+
+    // registra a tentativa (data/hora/casa/compatibilidade) e
+    // mostra no console a contagem, antes de exibir a tela.
+    registerAttempt(result);
 
     $("result-image").src = house.image;
     $("result-image").alt = "Escudo da " + house.name;
@@ -339,10 +499,10 @@
     }
   }
 
-  /* ---------- persistência ---------- */
+  /* ---------- persistência do progresso em curso ---------- */
   function save(extra) {
     try {
-      localStorage.setItem(
+      window.localStorage.setItem(
         STORE_KEY,
         JSON.stringify({ index: state.index, answers: state.answers, ...(extra || {}) })
       );
@@ -350,16 +510,7 @@
   }
 
   function clear() {
-    try { localStorage.removeItem(STORE_KEY); } catch (_) { /* noop */ }
-  }
-
-  function restart() {
-    state.index = 0;
-    state.answers = [];
-    clear();
-    el.progressFill.style.width = "0%";
-    $("compat-fill").style.width = "0%";
-    show("landing");
+    try { window.localStorage.removeItem(STORE_KEY); } catch (_) { /* noop */ }
   }
 
   /* ---------- partículas douradas ---------- */
@@ -443,11 +594,15 @@
   /* ---------- init ---------- */
   function init() {
     paintShieldRows();
-    el.qTotal.textContent = String(QUESTIONS.length);
+    el.qTotal.textContent = String(QUESTIONS_PER_ATTEMPT);
 
     $("btn-start").addEventListener("click", () => {
+      // sorteio acontece uma única vez, aqui, no início do teste
+      state.questions = getRandomQuestions(QUESTIONS_PER_ATTEMPT);
       state.index = 0;
       state.answers = [];
+      el.qTotal.textContent = String(state.questions.length);
+
       show("quiz");
       renderQuestion();
       window.setTimeout(() => {
@@ -456,8 +611,8 @@
       }, 240);
     });
     $("btn-back").addEventListener("click", goBack);
-    $("btn-restart").addEventListener("click", restart);
     $("btn-share").addEventListener("click", share);
+    el.noticeClose.addEventListener("click", hideReturningNotice);
 
     // navegação por teclado no radiogroup das alternativas
     el.options.addEventListener("keydown", (ev) => {
@@ -475,6 +630,10 @@
     initParticles();
     initRipple();
     initParallax();
+
+    // avisa discretamente, sem bloquear, se este dispositivo já
+    // tiver feito o teste antes
+    warnIfReturningUser();
   }
 
   if (document.readyState === "loading") {
